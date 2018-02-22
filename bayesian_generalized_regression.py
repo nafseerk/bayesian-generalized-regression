@@ -1,6 +1,5 @@
 from data_loader import DataLoader
 import numpy as np
-from scipy.stats import multivariate_normal
 import pandas as pd
 import pprint
 
@@ -14,10 +13,10 @@ class BayesianGeneralizedRegression:
         self.lambda_val = lambda_val
         self.output_noise_mean = 0
         self.output_noise_variance = 1
-        self.weights_prior = None
+        self.y_vector = None
         self.phi_matrix = None
         self.A_matrix = None
-        self.weights_posterior = None
+        self.A_inv = None
         self.mse_error = None
 
     def get_basis_function_vector(self, x):
@@ -48,77 +47,57 @@ class BayesianGeneralizedRegression:
         self.phi_matrix = phi_matrix
         return self.phi_matrix
 
-    def set_weights_prior(self, weights_prior):
-        self.weights_prior = weights_prior
-
     def compute_A_matrix(self):
 
         phi_phi = np.matmul(self.phi_matrix, np.transpose(self.phi_matrix))
         self.A_matrix = np.add((1/self.output_noise_variance**2) * phi_phi,
                                np.linalg.inv(np.identity(self.basis_vector_size, dtype=float)))
+        self.A_inv = np.linalg.inv(self.A_matrix)
         return self.A_matrix
 
-    def compute_weights_posterior(self, dataset):
+    def prediction_mean_function(self, dataset, new_x):
 
-        y_vector = []
+        phi_y = np.matmul(self.phi_matrix, self.y_vector)
+
+        phi_new_x = self.get_basis_function_vector(new_x)
+        phi_new_x_transpose = phi_new_x.reshape((1, phi_new_x.shape[0]))
+
+        return np.matmul((1 / self.output_noise_variance ** 2) * phi_new_x_transpose,
+                         np.matmul(self.A_inv, phi_y))[0]
+
+    def prediction_covariance_function(self, new_x):
+
+        phi_new_x = self.get_basis_function_vector(new_x)
+        phi_new_x_transpose = phi_new_x.reshape((1, phi_new_x.shape[0]))
+
+        return np.matmul(phi_new_x_transpose,
+                         np.matmul(self.A_inv, phi_new_x))
+
+    def learn(self, dataset, report_error=False):
+
+        self.compute_phi_matrix(dataset)
+        self.compute_A_matrix()
+
+        self.y_vector = []
         for train_set_attrs, train_set_labels in dataset:
 
             if len(train_set_attrs) != len(train_set_labels):
                 raise ValueError('Count mismatch between attributes and labels')
 
-            y_vector += train_set_labels.ix[:, 0].tolist()
+            self.y_vector += train_set_labels.ix[:, 0].tolist()
 
-        y_vector = np.array(y_vector, dtype=float)
-        y_vector.reshape((y_vector.shape[0], 1))
-
-        phi_y = np.matmul(self.phi_matrix, y_vector)
-
-        A_inv = np.linalg.inv(self.A_matrix)
-
-        self.weights_posterior = np.matmul((1/self.output_noise_variance**2) * A_inv, phi_y)
-        return self.weights_posterior
-
-    def learn(self, dataset, report_error=False):
-        prior = np.random.multivariate_normal(mean=np.zeros(self.basis_vector_size, dtype=float),
-                                              cov=np.identity(self.basis_vector_size, dtype=float))
-        self.set_weights_prior(prior)
-
-        self.compute_phi_matrix(dataset)
-        self.compute_A_matrix()
-        self.compute_weights_posterior(dataset)
+        self.y_vector = np.array(self.y_vector, dtype=float)
+        self.y_vector.reshape((self.y_vector.shape[0], 1))
 
         if report_error:
             self.mse_error = self.k_fold_cross_validation(dataset)
             print('Mean Square Error = %.3f ' % self.mse_error)
 
-    # TODO - needs answer from pizza https://piazza.com/class/jbsuid7p3826k?cid=238
     def predict_point(self, dataset, new_x):
-
-        phi_new_x = self.get_basis_function_vector(new_x)
-        phi_new_x_transpose = phi_new_x.reshape((1, phi_new_x.shape[0]))
-        A_inv = np.linalg.inv(self.A_matrix)
-
-        y_vector = []
-        for train_set_attrs, train_set_labels in dataset:
-
-            if len(train_set_attrs) != len(train_set_labels):
-                raise ValueError('Count mismatch between attributes and labels')
-
-            y_vector += train_set_labels.ix[:, 0].tolist()
-
-        y_vector = np.array(y_vector, dtype=float)
-        y_vector.reshape((y_vector.shape[0], 1))
-
-        phi_y = np.matmul(self.phi_matrix, y_vector)
-        A_inv_phi_y = np.matmul(A_inv, phi_y)
-
-        mean = np.matmul((1/self.output_noise_variance**2) * phi_new_x_transpose, A_inv_phi_y)
-        covariance = np.matmul(phi_new_x_transpose,
-                               np.matmul(A_inv, phi_new_x))
-
-        w_transpose = np.reshape(self.weights_posterior, (1, self.weights_posterior.shape[0]))
-        predicted_value = np.matmul(w_transpose, phi_new_x)[0][0]
-        return predicted_value
+        """
+        uses mean of the posterior distribution for prediction
+        """
+        return self.prediction_mean_function(dataset, new_x)
 
     def predict(self, train_dataset, test_attrs, true_values=None):
         N = len(test_attrs)
@@ -169,12 +148,6 @@ class BayesianGeneralizedRegression:
         print('\nA Matrix of size', end=' ')
         print(self.A_matrix.shape, ':')
         pprint.pprint(self.A_matrix)
-        print('\nPrior Weights of size', end=' ')
-        print(self.weights_prior.shape, ':')
-        pprint.pprint(self.weights_prior)
-        print('\nPosterior Weights of size', end=' ')
-        print(self.weights_posterior.shape, ':')
-        pprint.pprint(self.weights_posterior)
 
         if self.mse_error:
             print('Mean Square Error = %.3f ' % self.mse_error)
@@ -214,30 +187,32 @@ if __name__ == '__main__':
     print('=====A Matrix====')
     pprint.pprint(result)
 
-    # Test posterior weights
-    print('\n===Test posterior weights===')
-    model = BayesianGeneralizedRegression(input_vector_degree=2, feature_vector_degree=2)
-    train_attrs, train_labels = DataLoader.load_dataset(
-        './regression-dataset/fData1.csv',
-        './regression-dataset/fLabels1.csv'
-    )
-    model.compute_phi_matrix([(train_attrs, train_labels)])
-    model.compute_A_matrix()
-    result = model.compute_weights_posterior([(train_attrs, train_labels)])
-    print('Posterior weights vector shape =', result.shape)
-    print('=====Posterior weights vector====')
-    pprint.pprint(result)
-
     # Test  predict_point
     print('\n===Test predict_point===')
     model = BayesianGeneralizedRegression(input_vector_degree=2, feature_vector_degree=2)
     full_dataset = DataLoader.load_full_dataset('./regression-dataset')
-    model.compute_phi_matrix(full_dataset)
-    model.compute_A_matrix()
-    model.compute_weights_posterior(full_dataset)
+    model.learn(full_dataset)
     test_new_x = np.array([7, 14]).reshape((2, 1))
     result = model.predict_point(full_dataset, test_new_x)
     print('Predicted value for', test_new_x, '=', result)
+
+    # Test  prediction_mean_function
+    print('\n===Test prediction_mean_function===')
+    model = BayesianGeneralizedRegression(input_vector_degree=2, feature_vector_degree=2)
+    full_dataset = DataLoader.load_full_dataset('./regression-dataset')
+    model.learn(full_dataset)
+    test_new_x = np.array([7, 14]).reshape((2, 1))
+    result = model.prediction_mean_function(full_dataset, test_new_x)
+    print('Predicted mean function value for', test_new_x, '=', result)
+
+    # Test  prediction_covariance_function
+    print('\n===Test prediction_covariance_function===')
+    model = BayesianGeneralizedRegression(input_vector_degree=2, feature_vector_degree=2)
+    full_dataset = DataLoader.load_full_dataset('./regression-dataset')
+    model.learn(full_dataset)
+    test_new_x = np.array([7, 14]).reshape((2, 1))
+    result = model.prediction_covariance_function(test_new_x)
+    print('Predicted covariance function value for', test_new_x, '=', result)
 
     # Test learn with cross validation for different values of basis function degree
     print('\n===Test learn with cross validation for different values of basis function degree===')
